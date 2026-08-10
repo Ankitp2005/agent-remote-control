@@ -16,7 +16,9 @@
 
 require('dotenv').config();
 const { WebSocketServer } = require('ws');
-const { spawn }           = require('child_process');
+const http = require('http');
+const fs   = require('fs');
+const path = require('path');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -39,13 +41,43 @@ if (BIND_IP === '0.0.0.0') {
 }
 
 const POLL_INTERVAL_MS = 500;
+const CLIENT_DIR = path.join(__dirname, '..', 'client');
 
-// ─── WebSocket server ─────────────────────────────────────────────────────────
+const server = http.createServer((req, res) => {
+  let reqPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+  const safePath = path.normalize(reqPath).replace(/^(\.\.[\/\\])+/, '');
+  const filePath = path.join(CLIENT_DIR, safePath);
 
-const wss = new WebSocketServer({ host: BIND_IP, port: PORT });
+  if (!filePath.startsWith(CLIENT_DIR)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
 
-wss.on('listening', () => {
-  console.log(`[daemon] Listening on ws://${BIND_IP}:${PORT}`);
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeTypes = {
+      '.html': 'text/html; charset=utf-8',
+      '.js': 'application/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.json': 'application/json; charset=utf-8'
+    };
+
+    res.writeHead(200, { 'Content-Type': mimeTypes[ext] || 'text/plain' });
+    res.end(data);
+  });
+});
+
+const wss = new WebSocketServer({ server });
+
+server.listen(PORT, BIND_IP, () => {
+  console.log(`[daemon] Listening on http://${BIND_IP}:${PORT} (Client) and ws://${BIND_IP}:${PORT} (WebSocket)`);
   console.log(`[daemon] Session: ${SESSION_NAME}`);
   console.log(`[daemon] Waiting for phone to connect...`);
 });

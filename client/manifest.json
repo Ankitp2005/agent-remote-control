@@ -1,0 +1,17 @@
+{
+  "name": "Agent Remote Control",
+  "short_name": "AgentControl",
+  "description": "Mobile remote control for local AI coding agent sessions",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230f172a'/><path d='M30 35 L45 50 L30 65' stroke='%2338bdf8' stroke-width='8' stroke-linecap='round' stroke-linejoin='round' fill='none'/><rect x='52' y='60' width='20' height='6' fill='%2338bdf8' rx='3'/></svg>",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
