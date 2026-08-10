@@ -1,0 +1,6 @@
+# Never commit the real token
+.env
+
+# npm
+node_modules/
+package-lock.json
