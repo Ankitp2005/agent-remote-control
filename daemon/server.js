@@ -16,6 +16,7 @@
 
 require('dotenv').config();
 const { WebSocketServer } = require('ws');
+const { spawn }           = require('child_process');
 const http = require('http');
 const fs   = require('fs');
 const path = require('path');
