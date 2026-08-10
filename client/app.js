@@ -1,5 +1,5 @@
 /**
- * Agent Remote Control - Mobile PWA Client (Phase 1)
+ * Agent Remote Control - Mobile PWA Client (Phase 2)
  */
 
 'use strict';
@@ -8,6 +8,7 @@
 const STORAGE_IP = 'arc_daemon_ip';
 const STORAGE_PORT = 'arc_daemon_port';
 const STORAGE_TOKEN = 'arc_daemon_token';
+const STORAGE_SESSION = 'arc_last_session';
 
 // ─── DOM Elements ─────────────────────────────────────────────────────────────
 const statusDot = document.getElementById('status-dot');
@@ -19,6 +20,9 @@ const outputPane = document.getElementById('output-pane');
 const promptForm = document.getElementById('prompt-form');
 const promptInput = document.getElementById('prompt-input');
 const sendBtn = document.getElementById('send-btn');
+
+const sessionSelect = document.getElementById('session-select');
+const refreshSessionsBtn = document.getElementById('refresh-sessions-btn');
 
 const openSettingsBtn = document.getElementById('open-settings-btn');
 const cancelSettingsBtn = document.getElementById('cancel-settings-btn');
@@ -32,6 +36,8 @@ const settingToken = document.getElementById('setting-token');
 let socket = null;
 let reconnectTimer = null;
 let isAuthenticated = false;
+let currentSession = null;
+let availableSessions = [];
 
 // ─── PWA Service Worker Registration ──────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -47,7 +53,8 @@ function getSettings() {
   return {
     ip: localStorage.getItem(STORAGE_IP) || '',
     port: localStorage.getItem(STORAGE_PORT) || '8787',
-    token: localStorage.getItem(STORAGE_TOKEN) || ''
+    token: localStorage.getItem(STORAGE_TOKEN) || '',
+    lastSession: localStorage.getItem(STORAGE_SESSION) || ''
   };
 }
 
@@ -89,6 +96,10 @@ function hideError() {
   errorBanner.classList.add('hidden');
 }
 
+function clearOutput() {
+  outputPane.textContent = '';
+}
+
 function appendOutput(text) {
   if (!text) return;
   const isScrolledToBottom = outputPane.scrollHeight - outputPane.clientHeight <= outputPane.scrollTop + 30;
@@ -105,6 +116,75 @@ function setFormEnabled(enabled) {
   sendBtn.disabled = !enabled;
   if (enabled) {
     promptInput.focus();
+  }
+}
+
+// ─── Session Management ───────────────────────────────────────────────────────
+function updateSessionPicker(sessions) {
+  availableSessions = Array.isArray(sessions) ? sessions : [];
+  sessionSelect.innerHTML = '';
+
+  if (availableSessions.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No tmux sessions found';
+    sessionSelect.appendChild(opt);
+    sessionSelect.disabled = true;
+    setFormEnabled(false);
+    currentSession = null;
+    return;
+  }
+
+  sessionSelect.disabled = !isAuthenticated;
+
+  availableSessions.forEach((s) => {
+    const opt = document.createElement('option');
+    opt.value = s;
+    opt.textContent = s;
+    sessionSelect.appendChild(opt);
+  });
+
+  const { lastSession } = getSettings();
+  let targetSession = currentSession;
+
+  if (!targetSession || !availableSessions.includes(targetSession)) {
+    if (lastSession && availableSessions.includes(lastSession)) {
+      targetSession = lastSession;
+    } else {
+      targetSession = availableSessions[0];
+    }
+  }
+
+  sessionSelect.value = targetSession;
+
+  if (targetSession && targetSession !== currentSession) {
+    subscribeToSession(targetSession);
+  }
+}
+
+function subscribeToSession(sessionName) {
+  if (!sessionName || !socket || socket.readyState !== WebSocket.OPEN || !isAuthenticated) {
+    return;
+  }
+
+  currentSession = sessionName;
+  localStorage.setItem(STORAGE_SESSION, sessionName);
+  sessionSelect.value = sessionName;
+
+  clearOutput();
+  setStatus('connected', `Subscribed: ${sessionName}`);
+
+  socket.send(JSON.stringify({
+    type: 'subscribe',
+    session: sessionName
+  }));
+
+  setFormEnabled(true);
+}
+
+function requestSessionsList() {
+  if (socket && socket.readyState === WebSocket.OPEN && isAuthenticated) {
+    socket.send(JSON.stringify({ type: 'list_sessions' }));
   }
 }
 
@@ -126,6 +206,8 @@ function connect() {
   const wsUrl = `ws://${ip}:${port}`;
   setStatus('connecting', `Connecting to ${ip}...`);
   setFormEnabled(false);
+  sessionSelect.disabled = true;
+  refreshSessionsBtn.disabled = true;
   isAuthenticated = false;
 
   try {
@@ -156,10 +238,15 @@ function connect() {
     if (msg.type === 'ready') {
       isAuthenticated = true;
       hideError();
-      setStatus('connected', `Connected (${msg.session || 'agent'})`);
-      setFormEnabled(true);
+      setStatus('connected', 'Connected');
+      refreshSessionsBtn.disabled = false;
+    } else if (msg.type === 'sessions') {
+      updateSessionPicker(msg.sessions);
     } else if (msg.type === 'output') {
-      appendOutput(msg.text);
+      // Ignore outputs for other sessions if client switched quickly
+      if (!msg.session || msg.session === currentSession) {
+        appendOutput(msg.text);
+      }
     } else if (msg.type === 'error') {
       showError(msg.message || 'Daemon error occurred');
     }
@@ -173,6 +260,8 @@ function connect() {
   socket.onclose = (event) => {
     isAuthenticated = false;
     setFormEnabled(false);
+    sessionSelect.disabled = true;
+    refreshSessionsBtn.disabled = true;
 
     let reason = 'Disconnected';
     if (event.code === 4401) {
@@ -208,14 +297,27 @@ promptForm.addEventListener('submit', (e) => {
   if (!text || !socket || socket.readyState !== WebSocket.OPEN || !isAuthenticated) {
     return;
   }
+  if (!currentSession) {
+    showError('No active session selected. Please select a session first.');
+    return;
+  }
 
-  // Echo user prompt locally in output pane
-  appendOutput(`\n> ${text}\n`);
-  
-  socket.send(JSON.stringify({ type: 'prompt', text: text }));
+  socket.send(JSON.stringify({
+    type: 'prompt',
+    session: currentSession,
+    text: text
+  }));
   promptInput.value = '';
 });
 
+sessionSelect.addEventListener('change', (e) => {
+  const selected = e.target.value;
+  if (selected && selected !== currentSession) {
+    subscribeToSession(selected);
+  }
+});
+
+refreshSessionsBtn.addEventListener('click', requestSessionsList);
 openSettingsBtn.addEventListener('click', openSettingsModal);
 cancelSettingsBtn.addEventListener('click', closeSettingsModal);
 dismissErrorBtn.addEventListener('click', hideError);

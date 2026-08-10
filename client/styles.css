@@ -68,6 +68,48 @@ html, body {
   color: var(--text-main);
 }
 
+/* Session Bar */
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background-color: rgba(15, 23, 42, 0.95);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.session-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.session-select {
+  flex: 1;
+  background-color: var(--bg-terminal);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: var(--accent-cyan);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 600;
+  outline: none;
+}
+
+.session-select:focus {
+  border-color: var(--accent-cyan);
+}
+
+.session-select:disabled {
+  opacity: 0.5;
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
 .status-badge {
   display: flex;
   align-items: center;

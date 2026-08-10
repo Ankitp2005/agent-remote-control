@@ -34,6 +34,17 @@
       </button>
     </header>
 
+    <!-- Session Selector Bar -->
+    <div class="session-bar">
+      <label for="session-select" class="session-label">Session:</label>
+      <select id="session-select" class="session-select" disabled>
+        <option value="">Select a session...</option>
+      </select>
+      <button id="refresh-sessions-btn" class="btn-icon" title="Refresh Sessions" disabled>
+        🔄
+      </button>
+    </div>
+
     <!-- Error Banner -->
     <div id="error-banner" class="error-banner hidden">
       <span id="error-message">Connection error</span>

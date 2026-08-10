@@ -1,15 +1,19 @@
 /**
- * agent-remote-control daemon — Phase 1
+ * agent-remote-control daemon — Phase 2
  *
- * Bridges a WebSocket client (the phone) to a named tmux session on this PC.
+ * Bridges a WebSocket client (the phone) to tmux sessions on this PC.
+ * Supports dynamic session discovery, switching, and per-session output streaming.
  * Binds only to the machine's Tailscale IP — never 0.0.0.0.
  *
  * Message schema (all JSON, all have a "type" field):
- *   client → daemon:  { type: "auth",   token: "<AUTH_TOKEN>" }
- *   client → daemon:  { type: "prompt", text:  "<prompt text>" }
- *   daemon → client:  { type: "ready",  session: "<SESSION_NAME>" }
- *   daemon → client:  { type: "output", text:  "<new pane text>" }
- *   daemon → client:  { type: "error",  message: "<reason>" }
+ *   client → daemon:  { type: "auth",          token: "<AUTH_TOKEN>" }
+ *   client → daemon:  { type: "list_sessions" }
+ *   client → daemon:  { type: "subscribe",     session: "<SESSION_NAME>" }
+ *   client → daemon:  { type: "prompt",        session: "<SESSION_NAME>", text: "<prompt text>" }
+ *   daemon → client:  { type: "ready" }
+ *   daemon → client:  { type: "sessions",      sessions: ["agent-1", ...] }
+ *   daemon → client:  { type: "output",        session: "<SESSION_NAME>", text: "<new pane text>" }
+ *   daemon → client:  { type: "error",         message: "<reason>" }
  */
 
 'use strict';
@@ -23,10 +27,9 @@ const path = require('path');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const AUTH_TOKEN   = process.env.AUTH_TOKEN;
-const SESSION_NAME = process.env.SESSION_NAME || 'agent-1';
-const PORT         = parseInt(process.env.PORT || '8787', 10);
-const BIND_IP      = process.env.BIND_IP;
+const AUTH_TOKEN = process.env.AUTH_TOKEN;
+const PORT       = parseInt(process.env.PORT || '8787', 10);
+const BIND_IP    = process.env.BIND_IP;
 
 if (!AUTH_TOKEN) {
   console.error('[daemon] FATAL: AUTH_TOKEN is not set in .env');
@@ -43,6 +46,16 @@ if (BIND_IP === '0.0.0.0') {
 
 const POLL_INTERVAL_MS = 500;
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
+
+// ─── State ───────────────────────────────────────────────────────────────────
+
+// Keyed by session name -> { lastCapture: string }
+const sessionState = new Map();
+
+// Keyed by session name -> Set<ws>
+const subscriptions = new Map();
+
+// ─── HTTP Server (Client Static Assets) ──────────────────────────────────────
 
 const server = http.createServer((req, res) => {
   let reqPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
@@ -79,214 +92,303 @@ const wss = new WebSocketServer({ server });
 
 server.listen(PORT, BIND_IP, () => {
   console.log(`[daemon] Listening on http://${BIND_IP}:${PORT} (Client) and ws://${BIND_IP}:${PORT} (WebSocket)`);
-  console.log(`[daemon] Session: ${SESSION_NAME}`);
-  console.log(`[daemon] Waiting for phone to connect...`);
+  console.log(`[daemon] Session discovery enabled — dynamic tmux session management`);
+  console.log(`[daemon] Waiting for client connection...`);
 });
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function send(ws, obj) {
+  if (ws && ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify(obj));
+  }
+}
+
+/**
+ * Run a command via spawn (no shell interpolation) and collect stdout/stderr.
+ * Returns a Promise<{ stdout, stderr, code }>.
+ */
+function runCommand(cmd, args) {
+  return new Promise((resolve) => {
+    const proc = spawn(cmd, args, { shell: false });
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('close', (code) => resolve({ stdout, stderr, code }));
+    proc.on('error', (err) => resolve({ stdout: '', stderr: err.message, code: -1 }));
+  });
+}
+
+/**
+ * List all running tmux session names.
+ * Returns Promise<Array<string>>.
+ */
+async function listSessions() {
+  const { stdout, code } = await runCommand('tmux', [
+    'list-sessions', '-F', '#{session_name}'
+  ]);
+  if (code !== 0 || !stdout.trim()) return [];
+  return stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Capture the current visible pane text of a tmux session.
+ * Returns null if the session doesn't exist or tmux errors.
+ */
+async function capturePane(sessionName) {
+  if (!sessionName) return null;
+  const { stdout, code } = await runCommand('tmux', [
+    'capture-pane', '-t', sessionName, '-p'
+  ]);
+  if (code !== 0) return null;
+  return stdout;
+}
+
+/**
+ * Send keys to a tmux session. text must already be validated/trusted.
+ * Uses spawn args array — never shell-interpolates the prompt text.
+ */
+async function sendKeys(sessionName, text) {
+  return await runCommand('tmux', [
+    'send-keys', '-t', sessionName, text, 'Enter'
+  ]);
+}
+
+/**
+ * Clean up pane output by stripping trailing whitespace/newlines from terminal grid padding.
+ */
+function cleanCapture(raw) {
+  if (!raw) return '';
+  return raw.replace(/[\r\n\s]+$/, '');
+}
+
+/**
+ * Compute the new appended text between lastClean and currentClean.
+ * Returns { isAppend: boolean, diff: string }
+ */
+function computeDiff(lastClean, currentClean) {
+  if (!lastClean) return { isAppend: false, diff: currentClean };
+  if (currentClean === lastClean) return { isAppend: true, diff: '' };
+
+  // Case 1: Direct prefix match (simple append without scroll)
+  if (currentClean.startsWith(lastClean)) {
+    return { isAppend: true, diff: currentClean.slice(lastClean.length) };
+  }
+
+  // Case 2: Overlap match (handles scrolling when top lines roll off)
+  for (let i = 1; i < lastClean.length; i++) {
+    const suffix = lastClean.slice(i);
+    if (currentClean.startsWith(suffix)) {
+      return { isAppend: true, diff: currentClean.slice(suffix.length) };
+    }
+  }
+
+  // Case 3: Full redraw / clear screen
+  return { isAppend: false, diff: currentClean };
+}
+
+// ─── Subscription Helpers ────────────────────────────────────────────────────
+
+async function sendSessionsList(ws) {
+  const sessions = await listSessions();
+  send(ws, { type: 'sessions', sessions });
+}
+
+function unsubscribeClient(ws) {
+  const oldSession = ws.subscribedSession;
+  if (!oldSession) return;
+
+  ws.subscribedSession = null;
+  const clientSet = subscriptions.get(oldSession);
+  if (clientSet) {
+    clientSet.delete(ws);
+    if (clientSet.size === 0) {
+      subscriptions.delete(oldSession);
+      sessionState.delete(oldSession);
+    }
+  }
+}
+
+async function subscribeClient(ws, sessionName) {
+  unsubscribeClient(ws);
+
+  const rawCapture = await capturePane(sessionName);
+  if (rawCapture === null) {
+    send(ws, { type: 'error', message: `Session '${sessionName}' not found` });
+    return;
+  }
+
+  if (!subscriptions.has(sessionName)) {
+    subscriptions.set(sessionName, new Set());
+  }
+  subscriptions.get(sessionName).add(ws);
+  ws.subscribedSession = sessionName;
+
+  const clean = cleanCapture(rawCapture);
+  sessionState.set(sessionName, { lastCapture: clean });
+
+  // Send immediate initial output frame with current full pane content
+  send(ws, { type: 'output', session: sessionName, text: clean });
+}
+
+// ─── Global Session Polling Loop ──────────────────────────────────────────────
+
+setInterval(async () => {
+  try {
+    if (subscriptions.size === 0) return;
+
+    for (const [sessionName, clientSet] of subscriptions.entries()) {
+      if (clientSet.size === 0) {
+        subscriptions.delete(sessionName);
+        sessionState.delete(sessionName);
+        continue;
+      }
+
+      const rawCapture = await capturePane(sessionName);
+
+      if (rawCapture === null) {
+        // Session disappeared or was killed on the PC
+        const errorMsg = { type: 'error', message: `Session '${sessionName}' not found` };
+        for (const client of clientSet) {
+          client.subscribedSession = null;
+          send(client, errorMsg);
+        }
+        subscriptions.delete(sessionName);
+        sessionState.delete(sessionName);
+        continue;
+      }
+
+      const clean = cleanCapture(rawCapture);
+      const state = sessionState.get(sessionName) || { lastCapture: '' };
+
+      if (clean === state.lastCapture) {
+        continue;
+      }
+
+      const { diff } = computeDiff(state.lastCapture, clean);
+      state.lastCapture = clean;
+      sessionState.set(sessionName, state);
+
+      if (diff.length > 0) {
+        const outputMsg = { type: 'output', session: sessionName, text: diff };
+        for (const client of clientSet) {
+          send(client, outputMsg);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[daemon] Error in polling loop:', err);
+  }
+}, POLL_INTERVAL_MS);
+
+// ─── Connection Lifecycle ─────────────────────────────────────────────────────
 
 wss.on('connection', (ws, req) => {
   const remote = req.socket.remoteAddress;
   console.log(`[daemon] Connection from ${remote} — awaiting auth`);
 
   let authenticated = false;
-  let pollTimer     = null;
-  let lastCapture   = '';
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
-
-  function send(obj) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify(obj));
-    }
-  }
-
-  function cleanup() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }
-
-  // ── tmux helpers ───────────────────────────────────────────────────────────
-
-  /**
-   * Run a command via spawn (no shell interpolation) and collect stdout/stderr.
-   * Returns a Promise<{ stdout, stderr, code }>.
-   */
-  function runCommand(cmd, args) {
-    return new Promise((resolve) => {
-      const proc = spawn(cmd, args, { shell: false });
-      let stdout = '';
-      let stderr = '';
-      proc.stdout.on('data', (d) => { stdout += d.toString(); });
-      proc.stderr.on('data', (d) => { stderr += d.toString(); });
-      proc.on('close', (code) => resolve({ stdout, stderr, code }));
-    });
-  }
-
-  /**
-   * Capture the current visible pane text of the tmux session.
-   * Returns null if the session doesn't exist or tmux errors.
-   */
-  async function capturePane() {
-    const { stdout, code } = await runCommand('tmux', [
-      'capture-pane', '-t', SESSION_NAME, '-p'
-    ]);
-    if (code !== 0) return null;
-    return stdout;
-  }
-
-  /**
-   * Send keys to the tmux session. text must already be validated/trusted.
-   * Uses spawn args array — never shell-interpolates the prompt text.
-   */
-  async function sendKeys(text) {
-    const { code, stderr } = await runCommand('tmux', [
-      'send-keys', '-t', SESSION_NAME, text, 'Enter'
-    ]);
-    if (code !== 0) {
-      console.error(`[daemon] tmux send-keys failed (${code}): ${stderr.trim()}`);
-      send({ type: 'error', message: `Failed to send to tmux session: ${stderr.trim()}` });
-    }
-  }
-
-  // ── Diffing helpers ────────────────────────────────────────────────────────
-
-  /**
-   * Clean up pane output by stripping trailing whitespace/newlines from terminal grid padding.
-   */
-  function cleanCapture(raw) {
-    if (!raw) return '';
-    return raw.replace(/[\r\n\s]+$/, '');
-  }
-
-  /**
-   * Compute the new appended text between lastClean and currentClean.
-   * Returns { isAppend: boolean, diff: string }
-   */
-  function computeDiff(lastClean, currentClean) {
-    if (!lastClean) return { isAppend: false, diff: currentClean };
-    if (currentClean === lastClean) return { isAppend: true, diff: '' };
-
-    // Case 1: Direct prefix match (simple append without scroll)
-    if (currentClean.startsWith(lastClean)) {
-      return { isAppend: true, diff: currentClean.slice(lastClean.length) };
-    }
-
-    // Case 2: Overlap match (handles scrolling when top lines roll off)
-    for (let i = 1; i < lastClean.length; i++) {
-      const suffix = lastClean.slice(i);
-      if (currentClean.startsWith(suffix)) {
-        return { isAppend: true, diff: currentClean.slice(suffix.length) };
-      }
-    }
-
-    // Case 3: Full redraw / clear screen
-    return { isAppend: false, diff: currentClean };
-  }
-
-  // ── Polling ────────────────────────────────────────────────────────────────
-
-  function startPolling() {
-    pollTimer = setInterval(async () => {
-      const rawCapture = await capturePane();
-
-      if (rawCapture === null) {
-        // tmux session is gone
-        send({ type: 'error', message: `tmux session '${SESSION_NAME}' not found. Is it still running?` });
-        cleanup();
-        return;
-      }
-
-      const clean = cleanCapture(rawCapture);
-      if (clean === lastCapture) {
-        // Nothing changed — don't send anything
-        return;
-      }
-
-      const { diff } = computeDiff(lastCapture, clean);
-      lastCapture = clean;
-
-      if (diff.length > 0) {
-        send({ type: 'output', text: diff });
-      }
-    }, POLL_INTERVAL_MS);
-  }
-
-  // ── Message handling ───────────────────────────────────────────────────────
 
   ws.on('message', async (raw) => {
-    let msg;
     try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      send({ type: 'error', message: 'Message must be valid JSON' });
-      return;
-    }
-
-    if (!msg.type) {
-      send({ type: 'error', message: 'Message missing "type" field' });
-      return;
-    }
-
-    // ── Auth ────────────────────────────────────────────────────────────────
-    if (msg.type === 'auth') {
-      if (authenticated) {
-        send({ type: 'error', message: 'Already authenticated' });
+      let msg;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        send(ws, { type: 'error', message: 'Message must be valid JSON' });
         return;
       }
-      if (msg.token !== AUTH_TOKEN) {
-        console.warn(`[daemon] Auth failed from ${remote} — wrong token`);
+
+      if (!msg.type) {
+        send(ws, { type: 'error', message: 'Message missing "type" field' });
+        return;
+      }
+
+      // ── Auth ──────────────────────────────────────────────────────────────────
+      if (msg.type === 'auth') {
+        if (authenticated) {
+          send(ws, { type: 'error', message: 'Already authenticated' });
+          return;
+        }
+        if (msg.token !== AUTH_TOKEN) {
+          console.warn(`[daemon] Auth failed from ${remote} — wrong token`);
+          ws.close(4401, 'Unauthorized');
+          return;
+        }
+
+        authenticated = true;
+        console.log(`[daemon] Authenticated: ${remote}`);
+        send(ws, { type: 'ready' });
+        await sendSessionsList(ws);
+        return;
+      }
+
+      // ── All other messages require auth ───────────────────────────────────────
+      if (!authenticated) {
         ws.close(4401, 'Unauthorized');
         return;
       }
 
-      // Auth ok — verify the tmux session exists before declaring ready
-      const capture = await capturePane();
-      if (capture === null) {
-        send({ type: 'error', message: `tmux session '${SESSION_NAME}' not found. Create it with: tmux new -s ${SESSION_NAME}` });
-        ws.close(4404, 'Session not found');
+      // ── List sessions ─────────────────────────────────────────────────────────
+      if (msg.type === 'list_sessions') {
+        await sendSessionsList(ws);
         return;
       }
 
-      authenticated = true;
-      lastCapture = cleanCapture(capture);
-      console.log(`[daemon] Authenticated: ${remote}`);
-      send({ type: 'ready', session: SESSION_NAME });
-      startPolling();
-      return;
-    }
-
-    // ── All other messages require auth ─────────────────────────────────────
-    if (!authenticated) {
-      ws.close(4401, 'Unauthorized');
-      return;
-    }
-
-    // ── Prompt ──────────────────────────────────────────────────────────────
-    if (msg.type === 'prompt') {
-      if (typeof msg.text !== 'string' || msg.text.trim().length === 0) {
-        send({ type: 'error', message: '"prompt" message must have a non-empty "text" field' });
+      // ── Subscribe ─────────────────────────────────────────────────────────────
+      if (msg.type === 'subscribe') {
+        if (typeof msg.session !== 'string' || !msg.session.trim()) {
+          send(ws, { type: 'error', message: '"subscribe" message must have a non-empty "session" field' });
+          return;
+        }
+        await subscribeClient(ws, msg.session.trim());
         return;
       }
-      console.log(`[daemon] Sending prompt to ${SESSION_NAME}: ${msg.text.slice(0, 80)}`);
-      await sendKeys(msg.text);
-      return;
-    }
 
-    // Unknown message type — ignore silently (forward-compat)
-    console.warn(`[daemon] Unknown message type: ${msg.type}`);
+      // ── Prompt ────────────────────────────────────────────────────────────────
+      if (msg.type === 'prompt') {
+        if (typeof msg.session !== 'string' || !msg.session.trim()) {
+          send(ws, { type: 'error', message: '"prompt" message must have a non-empty "session" field' });
+          return;
+        }
+        if (typeof msg.text !== 'string' || msg.text.trim().length === 0) {
+          send(ws, { type: 'error', message: '"prompt" message must have a non-empty "text" field' });
+          return;
+        }
+
+        const targetSession = msg.session.trim();
+        const rawCapture = await capturePane(targetSession);
+        if (rawCapture === null) {
+          send(ws, { type: 'error', message: `Session '${targetSession}' not found` });
+          return;
+        }
+
+        console.log(`[daemon] Sending prompt to ${targetSession}: ${msg.text.slice(0, 80)}`);
+        const { code, stderr } = await sendKeys(targetSession, msg.text);
+        if (code !== 0) {
+          console.error(`[daemon] tmux send-keys failed (${code}): ${stderr.trim()}`);
+          send(ws, { type: 'error', message: `Failed to send to tmux session: ${stderr.trim()}` });
+        }
+        return;
+      }
+
+      // Unknown message type — ignore silently (forward-compat)
+      console.warn(`[daemon] Unknown message type: ${msg.type}`);
+    } catch (err) {
+      console.error(`[daemon] Error processing message from ${remote}:`, err);
+      send(ws, { type: 'error', message: 'Internal daemon error processing message' });
+    }
   });
-
-  // ── Disconnect ─────────────────────────────────────────────────────────────
 
   ws.on('close', (code, reason) => {
     console.log(`[daemon] Client disconnected (${remote}) — code=${code} reason=${reason.toString()}`);
-    cleanup();
+    unsubscribeClient(ws);
   });
 
   ws.on('error', (err) => {
     console.error(`[daemon] WebSocket error (${remote}):`, err.message);
-    cleanup();
+    unsubscribeClient(ws);
   });
 });
 
