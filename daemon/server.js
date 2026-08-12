@@ -18,6 +18,14 @@
 
 'use strict';
 
+// ─── Process-level error handlers (surface crashes instead of silent exit) ────
+process.on('uncaughtException', (err) => {
+  console.error('[daemon] UNCAUGHT EXCEPTION:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[daemon] UNHANDLED REJECTION:', reason);
+});
+
 require('dotenv').config();
 const { WebSocketServer } = require('ws');
 const { spawn }           = require('child_process');
@@ -89,6 +97,25 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+
+// ─── WebSocket Heartbeat (ping/pong every 30s) ────────────────────────────────
+// Daemon sends protocol-level ws.ping() every 30s. Browsers automatically respond
+// with protocol-level PONG frames. If a client misses a full 30s cycle, it is terminated.
+const HEARTBEAT_INTERVAL_MS = 30000;
+
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      console.log(`[daemon] Heartbeat timeout — terminating dead connection`);
+      ws.terminate();
+      return;
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on('close', () => clearInterval(heartbeatInterval));
 
 server.listen(PORT, BIND_IP, () => {
   console.log(`[daemon] Listening on http://${BIND_IP}:${PORT} (Client) and ws://${BIND_IP}:${PORT} (WebSocket)`);
@@ -288,9 +315,14 @@ wss.on('connection', (ws, req) => {
   const remote = req.socket.remoteAddress;
   console.log(`[daemon] Connection from ${remote} — awaiting auth`);
 
+  // Mark connection alive; reset on each pong received from client
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   let authenticated = false;
 
   ws.on('message', async (raw) => {
+    ws.isAlive = true;
     try {
       let msg;
       try {
@@ -333,6 +365,12 @@ wss.on('connection', (ws, req) => {
       // ── List sessions ─────────────────────────────────────────────────────────
       if (msg.type === 'list_sessions') {
         await sendSessionsList(ws);
+        return;
+      }
+
+      // ── Ping ──────────────────────────────────────────────────────────────────
+      if (msg.type === 'ping') {
+        send(ws, { type: 'pong' });
         return;
       }
 
