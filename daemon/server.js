@@ -18,6 +18,10 @@
 
 'use strict';
 
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+console.log('[daemon] DNS result order set to ipv4first');
+
 // ─── Process-level error handlers (surface crashes instead of silent exit) ────
 process.on('uncaughtException', (err) => {
   console.error('[daemon] UNCAUGHT EXCEPTION:', err);
@@ -29,9 +33,10 @@ process.on('unhandledRejection', (reason) => {
 require('dotenv').config();
 const { WebSocketServer } = require('ws');
 const { spawn }           = require('child_process');
-const http = require('http');
-const fs   = require('fs');
-const path = require('path');
+const http  = require('http');
+const https = require('https');
+const fs    = require('fs');
+const path  = require('path');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -172,16 +177,39 @@ async function sendNtfyNotification(sessionName, matchedLine) {
   const topic = NTFY_TOPIC.trim();
   const bodyText = (matchedLine || '').slice(0, 200);
 
-  try {
-    console.log(`[daemon] Sending ntfy notification for session '${sessionName}': "${bodyText.slice(0, 60)}"`);
-    await fetch(`https://ntfy.sh/${topic}`, {
-      method: 'POST',
-      headers: { 'Title': `${sessionName} needs you` },
-      body: bodyText
-    });
-  } catch (err) {
-    console.error(`[daemon] Failed to send ntfy notification for session '${sessionName}':`, err.message);
-  }
+  return new Promise((resolve) => {
+    try {
+      console.log(`[daemon] Sending ntfy notification for session '${sessionName}': "${bodyText.slice(0, 60)}"`);
+      const postData = Buffer.from(bodyText, 'utf8');
+
+      const req = https.request({
+        hostname: 'ntfy.sh',
+        port: 443,
+        path: `/${topic}`,
+        method: 'POST',
+        family: 4,
+        headers: {
+          'Title': `${sessionName} needs you`,
+          'Content-Type': 'text/plain',
+          'Content-Length': postData.length
+        }
+      }, (res) => {
+        res.resume(); // consume response body
+        resolve();
+      });
+
+      req.on('error', (err) => {
+        console.error(`[daemon] Failed to send ntfy notification for session '${sessionName}':`, err.message, '| Cause:', err.cause || err);
+        resolve();
+      });
+
+      req.write(postData);
+      req.end();
+    } catch (err) {
+      console.error(`[daemon] Failed to send ntfy notification for session '${sessionName}':`, err.message, '| Cause:', err.cause || err);
+      resolve();
+    }
+  });
 }
 
 /**
