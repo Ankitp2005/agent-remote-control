@@ -266,6 +266,10 @@ function connect() {
     console.error('WebSocket error:', err);
     showError('WebSocket connection error');
     setStatus('disconnected', 'Connection error — retrying in 3s...');
+    // Always schedule a retry here. onclose will also fire after onerror
+    // on a failed connection, but scheduling here ensures the retry loop
+    // is active even if onclose doesn't fire (e.g. browser quirks).
+    scheduleReconnect();
   };
 
   socket.onclose = (event) => {
@@ -336,6 +340,9 @@ dismissErrorBtn.addEventListener('click', hideError);
 
 // ─── Network & Offline Event Listeners ─────────────────────────────────────────
 window.addEventListener('offline', () => {
+  // Cancel any pending reconnect — no point retrying into a dead network.
+  // Do NOT call scheduleReconnect() here. We wait for the 'online' event
+  // instead, which fires when the browser believes the network is back.
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -347,6 +354,9 @@ window.addEventListener('offline', () => {
   refreshSessionsBtn.disabled = true;
   setStatus('disconnected', 'No network — waiting...');
   if (socket) {
+    // Null handlers BEFORE close so this intentional teardown doesn't
+    // trigger the onclose → scheduleReconnect path (we want to wait for
+    // the 'online' event, not immediately retry into no network).
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
@@ -354,19 +364,28 @@ window.addEventListener('offline', () => {
     try {
       socket.close();
     } catch (e) {
-      // Ignore closing errors
+      // Ignore errors from closing an already-dead socket
     }
     socket = null;
   }
 });
 
 window.addEventListener('online', () => {
+  // The browser fires 'online' optimistically — the network interface is
+  // up but Tailscale routes may not be re-established yet. Use a short
+  // delay before the first attempt so we don't immediately fail and have
+  // to wait a full 3 s for the scheduled retry.
+  // scheduleReconnect() (not connect()) means: if this first attempt after
+  // airplane-off also fails, onerror/onclose will call scheduleReconnect()
+  // again and the retry loop stays active automatically.
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
   setStatus('connecting', 'Network restored — reconnecting...');
-  connect();
+  reconnectTimer = setTimeout(() => {
+    connect();
+  }, 1500); // 1.5 s grace period for Tailscale route re-establishment
 });
 
 settingsForm.addEventListener('submit', (e) => {
