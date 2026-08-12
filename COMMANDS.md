@@ -4,6 +4,30 @@
 
 ---
 
+## 0. ⚡ Start Here — Full Launch Sequence (Windows → WSL → Daemon)
+
+```powershell
+# ── Step 1: Open WSL from Windows PowerShell / Terminal ──────────────────────
+wsl
+
+# ── Step 2: Inside WSL — navigate to the daemon directory ────────────────────
+# Note: username has a space, so wrap the path in quotes
+cd "/mnt/c/Users/Ankit pandey/OneDrive/Desktop/mobilePrompting/agent-remote-control/daemon"
+
+# If you cloned directly inside WSL home, use this instead:
+# cd ~/agent-remote-control/daemon
+
+# ── Step 3: Start the daemon ──────────────────────────────────────────────────
+npm start
+```
+
+> **Tip:** Run steps 2 & 3 in a single line (inside WSL):
+> ```bash
+> cd "/mnt/c/Users/Ankit pandey/OneDrive/Desktop/mobilePrompting/agent-remote-control/daemon" && npm start
+> ```
+
+---
+
 ## 1. WSL — Launch & Navigate
 
 ```bash
