@@ -38,6 +38,7 @@ const path = require('path');
 const AUTH_TOKEN = process.env.AUTH_TOKEN;
 const PORT       = parseInt(process.env.PORT || '8787', 10);
 const BIND_IP    = process.env.BIND_IP;
+const NTFY_TOPIC = process.env.NTFY_TOPIC;
 
 if (!AUTH_TOKEN) {
   console.error('[daemon] FATAL: AUTH_TOKEN is not set in .env');
@@ -55,9 +56,24 @@ if (BIND_IP === '0.0.0.0') {
 const POLL_INTERVAL_MS = 500;
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
 
+// ─── Approval Pattern Detection Setup (Phase 3) ──────────────────────────────
+const patternsPath = path.join(__dirname, 'patterns.json');
+let patternsRegex = [];
+try {
+  if (fs.existsSync(patternsPath)) {
+    const rawPatterns = JSON.parse(fs.readFileSync(patternsPath, 'utf8'));
+    patternsRegex = rawPatterns.map((p) => new RegExp(p, 'i'));
+    console.log(`[daemon] Loaded ${patternsRegex.length} approval patterns from patterns.json`);
+  } else {
+    console.warn('[daemon] patterns.json not found — approval detection disabled');
+  }
+} catch (err) {
+  console.error('[daemon] Failed to load patterns.json:', err.message);
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
-// Keyed by session name -> { lastCapture: string }
+// Keyed by session name -> { lastCapture: string, waiting: boolean }
 const sessionState = new Map();
 
 // Keyed by session name -> Set<ws>
@@ -120,6 +136,11 @@ wss.on('close', () => clearInterval(heartbeatInterval));
 server.listen(PORT, BIND_IP, () => {
   console.log(`[daemon] Listening on http://${BIND_IP}:${PORT} (Client) and ws://${BIND_IP}:${PORT} (WebSocket)`);
   console.log(`[daemon] Session discovery enabled — dynamic tmux session management`);
+  if (NTFY_TOPIC && NTFY_TOPIC.trim()) {
+    console.log(`[daemon] Approval push notifications enabled (ntfy topic: ${NTFY_TOPIC.trim()})`);
+  } else {
+    console.log(`[daemon] Approval push notifications disabled (NTFY_TOPIC not set in .env)`);
+  }
   console.log(`[daemon] Waiting for client connection...`);
 });
 
@@ -128,6 +149,73 @@ server.listen(PORT, BIND_IP, () => {
 function send(ws, obj) {
   if (ws && ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(obj));
+  }
+}
+
+/**
+  * Broadcast JSON message to all authenticated connected clients.
+  */
+function broadcast(obj) {
+  const json = JSON.stringify(obj);
+  wss.clients.forEach((ws) => {
+    if (ws.readyState === ws.OPEN && ws.authenticated) {
+      ws.send(json);
+    }
+  });
+}
+
+/**
+  * Send a push notification to ntfy.sh if NTFY_TOPIC is configured.
+  */
+async function sendNtfyNotification(sessionName, matchedLine) {
+  if (!NTFY_TOPIC || !NTFY_TOPIC.trim()) return;
+  const topic = NTFY_TOPIC.trim();
+  const bodyText = (matchedLine || '').slice(0, 200);
+
+  try {
+    console.log(`[daemon] Sending ntfy notification for session '${sessionName}': "${bodyText.slice(0, 60)}"`);
+    await fetch(`https://ntfy.sh/${topic}`, {
+      method: 'POST',
+      headers: { 'Title': `${sessionName} needs you` },
+      body: bodyText
+    });
+  } catch (err) {
+    console.error(`[daemon] Failed to send ntfy notification for session '${sessionName}':`, err.message);
+  }
+}
+
+/**
+  * Check terminal output against approval patterns and handle waiting state transitions.
+  */
+function checkApprovalWaiting(sessionName, clean) {
+  if (patternsRegex.length === 0) return;
+
+  const state = sessionState.get(sessionName) || { lastCapture: '', waiting: false };
+  const lines = clean.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const lastLines = lines.slice(-3);
+
+  let matchedLine = null;
+  for (const line of lastLines) {
+    if (patternsRegex.some((regex) => regex.test(line))) {
+      matchedLine = line;
+      break;
+    }
+  }
+
+  const isMatching = matchedLine !== null;
+  const wasWaiting = !!state.waiting;
+
+  if (isMatching && !wasWaiting) {
+    state.waiting = true;
+    sessionState.set(sessionName, state);
+    console.log(`[daemon] Session '${sessionName}' entered WAITING state: "${matchedLine.slice(0, 80)}"`);
+    sendNtfyNotification(sessionName, matchedLine);
+    broadcast({ type: 'waiting', session: sessionName, waiting: true });
+  } else if (!isMatching && wasWaiting) {
+    state.waiting = false;
+    sessionState.set(sessionName, state);
+    console.log(`[daemon] Session '${sessionName}' cleared WAITING state`);
+    broadcast({ type: 'waiting', session: sessionName, waiting: false });
   }
 }
 
@@ -253,7 +341,11 @@ async function subscribeClient(ws, sessionName) {
   ws.subscribedSession = sessionName;
 
   const clean = cleanCapture(rawCapture);
-  sessionState.set(sessionName, { lastCapture: clean });
+  const existingState = sessionState.get(sessionName);
+  sessionState.set(sessionName, {
+    lastCapture: clean,
+    waiting: existingState ? !!existingState.waiting : false
+  });
 
   // Send immediate initial output frame with current full pane content
   send(ws, { type: 'output', session: sessionName, text: clean });
@@ -267,6 +359,10 @@ setInterval(async () => {
 
     for (const [sessionName, clientSet] of subscriptions.entries()) {
       if (clientSet.size === 0) {
+        const state = sessionState.get(sessionName);
+        if (state && state.waiting) {
+          broadcast({ type: 'waiting', session: sessionName, waiting: false });
+        }
         subscriptions.delete(sessionName);
         sessionState.delete(sessionName);
         continue;
@@ -276,6 +372,10 @@ setInterval(async () => {
 
       if (rawCapture === null) {
         // Session disappeared or was killed on the PC
+        const state = sessionState.get(sessionName);
+        if (state && state.waiting) {
+          broadcast({ type: 'waiting', session: sessionName, waiting: false });
+        }
         const errorMsg = { type: 'error', message: `Session '${sessionName}' not found` };
         for (const client of clientSet) {
           client.subscribedSession = null;
@@ -287,7 +387,11 @@ setInterval(async () => {
       }
 
       const clean = cleanCapture(rawCapture);
-      const state = sessionState.get(sessionName) || { lastCapture: '' };
+
+      // Check approval patterns and emit waiting transitions
+      checkApprovalWaiting(sessionName, clean);
+
+      const state = sessionState.get(sessionName) || { lastCapture: '', waiting: false };
 
       if (clean === state.lastCapture) {
         continue;
@@ -350,6 +454,7 @@ wss.on('connection', (ws, req) => {
         }
 
         authenticated = true;
+        ws.authenticated = true;
         console.log(`[daemon] Authenticated: ${remote}`);
         send(ws, { type: 'ready' });
         await sendSessionsList(ws);
