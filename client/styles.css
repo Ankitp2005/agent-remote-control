@@ -379,3 +379,19 @@ html, body {
   font-size: 0.95rem;
   cursor: pointer;
 }
+
+.settings-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  background-color: var(--bg-terminal);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 12px;
+  line-height: 1.4;
+}
+
+.settings-hint code {
+  color: var(--accent-cyan);
+  font-family: var(--font-mono);
+}

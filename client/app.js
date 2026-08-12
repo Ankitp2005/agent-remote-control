@@ -38,6 +38,7 @@ let reconnectTimer = null;
 let isAuthenticated = false;
 let currentSession = null;
 let availableSessions = [];
+const waitingSessions = new Set();
 
 // ─── PWA Service Worker Registration ──────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -124,6 +125,10 @@ function setFormEnabled(enabled) {
 // ─── Session Management ───────────────────────────────────────────────────────
 function updateSessionPicker(sessions) {
   availableSessions = Array.isArray(sessions) ? sessions : [];
+  renderSessionOptions();
+}
+
+function renderSessionOptions() {
   sessionSelect.innerHTML = '';
 
   if (availableSessions.length === 0) {
@@ -142,7 +147,8 @@ function updateSessionPicker(sessions) {
   availableSessions.forEach((s) => {
     const opt = document.createElement('option');
     opt.value = s;
-    opt.textContent = s;
+    const isWaiting = waitingSessions.has(s);
+    opt.textContent = isWaiting ? `🔴 ${s}` : s;
     sessionSelect.appendChild(opt);
   });
 
@@ -252,6 +258,15 @@ function connect() {
       refreshSessionsBtn.disabled = false;
     } else if (msg.type === 'sessions') {
       updateSessionPicker(msg.sessions);
+    } else if (msg.type === 'waiting') {
+      if (msg.session) {
+        if (msg.waiting) {
+          waitingSessions.add(msg.session);
+        } else {
+          waitingSessions.delete(msg.session);
+        }
+        renderSessionOptions();
+      }
     } else if (msg.type === 'output') {
       // Ignore outputs for other sessions if client switched quickly
       if (!msg.session || msg.session === currentSession) {
@@ -275,6 +290,7 @@ function connect() {
   socket.onclose = (event) => {
     isAuthenticated = false;
     currentSession = null;
+    waitingSessions.clear();
     setFormEnabled(false);
     sessionSelect.disabled = true;
     refreshSessionsBtn.disabled = true;
@@ -349,6 +365,7 @@ window.addEventListener('offline', () => {
   }
   isAuthenticated = false;
   currentSession = null;
+  waitingSessions.clear();
   setFormEnabled(false);
   sessionSelect.disabled = true;
   refreshSessionsBtn.disabled = true;
