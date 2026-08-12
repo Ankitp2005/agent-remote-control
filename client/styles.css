@@ -138,6 +138,17 @@ html, body {
   background-color: var(--accent-red);
 }
 
+.status-dot.connecting {
+  background-color: var(--accent-orange);
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.4; }
+  50% { opacity: 1; }
+  100% { opacity: 0.4; }
+}
+
 .btn-icon {
   background: transparent;
   border: none;

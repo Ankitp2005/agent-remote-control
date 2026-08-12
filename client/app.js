@@ -83,6 +83,8 @@ function setStatus(state, message) {
     statusDot.classList.add('connected');
   } else if (state === 'disconnected') {
     statusDot.classList.add('disconnected');
+  } else if (state === 'connecting') {
+    statusDot.classList.add('connecting');
   }
   statusText.textContent = message;
 }
@@ -212,6 +214,14 @@ function connect() {
 
   try {
     if (socket) {
+      // Null out handlers BEFORE closing so the intentional teardown
+      // doesn't trigger onclose → scheduleReconnect → connect() loop.
+      // Code 1005 (CLOSE_NO_STATUS) is what fires when we call .close()
+      // ourselves without a code — we must not treat that as a real disconnect.
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.onmessage = null;
+      socket.onopen = null;
       socket.close();
     }
     socket = new WebSocket(wsUrl);
@@ -255,10 +265,12 @@ function connect() {
   socket.onerror = (err) => {
     console.error('WebSocket error:', err);
     showError('WebSocket connection error');
+    setStatus('disconnected', 'Connection error — retrying in 3s...');
   };
 
   socket.onclose = (event) => {
     isAuthenticated = false;
+    currentSession = null;
     setFormEnabled(false);
     sessionSelect.disabled = true;
     refreshSessionsBtn.disabled = true;
@@ -321,6 +333,41 @@ refreshSessionsBtn.addEventListener('click', requestSessionsList);
 openSettingsBtn.addEventListener('click', openSettingsModal);
 cancelSettingsBtn.addEventListener('click', closeSettingsModal);
 dismissErrorBtn.addEventListener('click', hideError);
+
+// ─── Network & Offline Event Listeners ─────────────────────────────────────────
+window.addEventListener('offline', () => {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  isAuthenticated = false;
+  currentSession = null;
+  setFormEnabled(false);
+  sessionSelect.disabled = true;
+  refreshSessionsBtn.disabled = true;
+  setStatus('disconnected', 'No network — waiting...');
+  if (socket) {
+    socket.onclose = null;
+    socket.onerror = null;
+    socket.onmessage = null;
+    socket.onopen = null;
+    try {
+      socket.close();
+    } catch (e) {
+      // Ignore closing errors
+    }
+    socket = null;
+  }
+});
+
+window.addEventListener('online', () => {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  setStatus('connecting', 'Network restored — reconnecting...');
+  connect();
+});
 
 settingsForm.addEventListener('submit', (e) => {
   e.preventDefault();
