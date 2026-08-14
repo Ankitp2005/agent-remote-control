@@ -57,9 +57,42 @@ if ss -tln 2>/dev/null | grep -q ":${PORT}\ " || pgrep -f "node.*server.js" >/de
 else
     log "Daemon is not running. Starting daemon..."
     cd "$DAEMON_DIR"
-    nohup node server.js >> "$DAEMON_LOG" 2>&1 &
+
+    # --- Why plain `nohup node server.js &` dies when launched via Task Scheduler ---
+    #
+    # The process tree is:  Task Scheduler → cmd.exe → wsl.exe → bash → node
+    #
+    # When cmd.exe / wsl.exe exits after the script finishes, the kernel sends
+    # SIGHUP to every process still in that *session* (the controlling terminal
+    # session owned by cmd.exe). `nohup` only blocks SIGHUP delivery to node,
+    # but node is still a member of cmd.exe's *process group*. When the whole
+    # session's foreground process group exits, the OS tears down the session
+    # and orphaned background children that haven't been adopted by init get
+    # SIGHUP anyway — or worse, simply lose their controlling terminal and die.
+    #
+    # tmux survives because `tmux new-session -d` internally calls setsid(2),
+    # which creates a brand-new session with tmux as the session leader,
+    # completely detached from the parent session. init (PID 1) adopts it.
+    #
+    # Fix: use the same pattern —
+    #   setsid   → forks node into a brand-new process group AND session,
+    #              so it can never receive signals from the parent session
+    #   < /dev/null → severs stdin so there is no controlling terminal at all
+    #   nohup    → belt-and-suspenders: drops any residual SIGHUP
+    #   &        → backgrounds it
+    #   disown   → removes it from this shell's job table so bash doesn't
+    #              signal it when the shell itself exits
+    setsid nohup node server.js < /dev/null >> "$DAEMON_LOG" 2>&1 &
+    disown
+
+    # Give the process a moment to start, then confirm it survived
     sleep 1
-    DAEMON_STATUS="started"
+    if pgrep -f "node.*server.js" >/dev/null 2>&1; then
+        DAEMON_PID=$(pgrep -f "node.*server.js" | head -1)
+        DAEMON_STATUS="started (PID $DAEMON_PID)"
+    else
+        DAEMON_STATUS="FAILED TO START — check $DAEMON_LOG"
+    fi
 fi
 log "Daemon status: $DAEMON_STATUS"
 
