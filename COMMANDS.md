@@ -28,6 +28,40 @@ npm start
 
 ---
 
+## 0.1 🤖 Antigravity CLI & Agent Commands
+
+```powershell
+# ── Launch Antigravity CLI from Windows PowerShell ────────────────────────────
+antigravity-ide .
+
+# ── Launch Antigravity CLI from WSL (Linux terminal) ──────────────────────────
+"C:\Users\Ankit pandey\AppData\Local\Programs\Antigravity IDE\bin\antigravity-ide.cmd" .
+```
+
+### Running an Agent Session in tmux (for Remote Control)
+
+```bash
+# 1. Open WSL
+wsl
+
+# 2. Create a new tmux session named agent-1 (or antigravity)
+tmux new -s agent-1
+
+# 3. Inside tmux — run your desired CLI agent or command
+
+# 4. Detach from tmux (leaves session running in background):
+# Press Ctrl+B, release, then press D
+
+# 5. Re-attach to session anytime:
+tmux attach -t agent-1
+```
+
+> **Important tmux & CLI Notes:**
+> - **`duplicate session` error:** Means the session already exists or you are **already inside tmux** (look for the green bar `[antigravi0:bash*]` at the bottom of the screen).
+> - **`command not found` error:** `agent-1` or `antigravity` is the tmux session name, not a command. Type actual installed CLI tools inside the session.
+
+---
+
 ## 1. WSL — Launch & Navigate
 
 ```bash
@@ -249,3 +283,6 @@ nohup node server.js &> daemon.log &
 # View live daemon logs (if running via nohup)
 tail -f daemon.log
 ```
+
+
+<!-- Switch folders inside agy	:- /cd path\to\folder -->
