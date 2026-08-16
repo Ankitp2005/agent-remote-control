@@ -1,8 +1,9 @@
 /**
- * agent-remote-control daemon — Phase 2
+ * agent-remote-control daemon — Phase 5
  *
  * Bridges a WebSocket client (the phone) to tmux sessions on this PC.
- * Supports dynamic session discovery, switching, and per-session output streaming.
+ * Supports dynamic session discovery, switching, per-session output streaming,
+ * and remote session lifecycle (spawn and kill).
  * Binds only to the machine's Tailscale IP — never 0.0.0.0.
  *
  * Message schema (all JSON, all have a "type" field):
@@ -10,9 +11,15 @@
  *   client → daemon:  { type: "list_sessions" }
  *   client → daemon:  { type: "subscribe",     session: "<SESSION_NAME>" }
  *   client → daemon:  { type: "prompt",        session: "<SESSION_NAME>", text: "<prompt text>" }
+ *   client → daemon:  { type: "spawn_session", name: "<SESSION_NAME>", folder: "<FOLDER_PATH>" }
+ *   client → daemon:  { type: "kill_session",  name: "<SESSION_NAME>" }
  *   daemon → client:  { type: "ready" }
  *   daemon → client:  { type: "sessions",      sessions: ["agent-1", ...] }
  *   daemon → client:  { type: "output",        session: "<SESSION_NAME>", text: "<new pane text>" }
+ *   daemon → client:  { type: "waiting",       session: "<SESSION_NAME>", waiting: true|false }
+ *   daemon → client:  { type: "spawn_result",  success: true, name: "<SESSION_NAME>" }
+ *   daemon → client:  { type: "spawn_result",  success: false, reason: "<REASON>" }
+ *   daemon → client:  { type: "session_ended", session: "<SESSION_NAME>" }
  *   daemon → client:  { type: "error",         message: "<reason>" }
  */
 
@@ -37,6 +44,7 @@ const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
+const os    = require('os');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -263,6 +271,22 @@ function runCommand(cmd, args) {
   });
 }
 
+const SESSION_NAME_REGEX = /^[a-zA-Z0-9_-]{1,32}$/;
+
+/**
+ * Resolve folder path, supporting ~ for user home directory.
+ */
+function resolveFolderPath(folder) {
+  if (typeof folder !== 'string' || !folder.trim()) return null;
+  let clean = folder.trim();
+  if (clean === '~') {
+    clean = os.homedir();
+  } else if (clean.startsWith('~/') || clean.startsWith('~\\')) {
+    clean = path.join(os.homedir(), clean.slice(2));
+  }
+  return path.resolve(clean);
+}
+
 /**
  * List all running tmux session names.
  * Returns Promise<Array<string>>.
@@ -404,13 +428,14 @@ setInterval(async () => {
         if (state && state.waiting) {
           broadcast({ type: 'waiting', session: sessionName, waiting: false });
         }
-        const errorMsg = { type: 'error', message: `Session '${sessionName}' not found` };
         for (const client of clientSet) {
           client.subscribedSession = null;
-          send(client, errorMsg);
+          send(client, { type: 'session_ended', session: sessionName });
+          send(client, { type: 'error', message: `Session '${sessionName}' not found` });
         }
         subscriptions.delete(sessionName);
         sessionState.delete(sessionName);
+        listSessions().then((updated) => broadcast({ type: 'sessions', sessions: updated }));
         continue;
       }
 
@@ -541,6 +566,150 @@ wss.on('connection', (ws, req) => {
           console.error(`[daemon] tmux send-keys failed (${code}): ${stderr.trim()}`);
           send(ws, { type: 'error', message: `Failed to send to tmux session: ${stderr.trim()}` });
         }
+        return;
+      }
+
+      // ── Spawn session ─────────────────────────────────────────────────────────
+      if (msg.type === 'spawn_session') {
+        const name = typeof msg.name === 'string' ? msg.name.trim() : '';
+
+        // Validation 1: name matches ^[a-zA-Z0-9_-]{1,32}$
+        if (!name || !SESSION_NAME_REGEX.test(name)) {
+          send(ws, {
+            type: 'spawn_result',
+            success: false,
+            reason: 'Invalid session name: must be 1-32 characters containing only letters, numbers, hyphens, or underscores'
+          });
+          return;
+        }
+
+        // Validation 2: session does not already exist
+        const currentSessions = await listSessions();
+        if (currentSessions.includes(name)) {
+          send(ws, {
+            type: 'spawn_result',
+            success: false,
+            reason: 'session already exists'
+          });
+          return;
+        }
+
+        // Validation 3: folder exists and is a directory
+        if (typeof msg.folder !== 'string' || !msg.folder.trim()) {
+          send(ws, {
+            type: 'spawn_result',
+            success: false,
+            reason: 'folder not found'
+          });
+          return;
+        }
+
+        const resolvedFolder = resolveFolderPath(msg.folder);
+        if (!resolvedFolder || !fs.existsSync(resolvedFolder)) {
+          send(ws, {
+            type: 'spawn_result',
+            success: false,
+            reason: 'folder not found'
+          });
+          return;
+        }
+
+        try {
+          const stat = fs.statSync(resolvedFolder);
+          if (!stat.isDirectory()) {
+            send(ws, {
+              type: 'spawn_result',
+              success: false,
+              reason: 'folder is not a directory'
+            });
+            return;
+          }
+        } catch {
+          send(ws, {
+            type: 'spawn_result',
+            success: false,
+            reason: 'folder not found'
+          });
+          return;
+        }
+
+        console.log(`[daemon] Spawning session '${name}' in folder '${resolvedFolder}'`);
+        const spawnRes = await runCommand('tmux', [
+          'new-session', '-d', '-s', name, '-c', resolvedFolder
+        ]);
+
+        if (spawnRes.code !== 0) {
+          console.error(`[daemon] tmux new-session failed (${spawnRes.code}): ${spawnRes.stderr.trim()}`);
+          send(ws, {
+            type: 'spawn_result',
+            success: false,
+            reason: spawnRes.stderr.trim() || 'Failed to create tmux session'
+          });
+          return;
+        }
+
+        // Let the shell settle before launching agy (avoid race condition where shell is not yet ready)
+        await new Promise((r) => setTimeout(r, 500));
+
+        const sendRes = await runCommand('tmux', [
+          'send-keys', '-t', name, 'agy', 'Enter'
+        ]);
+
+        if (sendRes.code !== 0) {
+          console.error(`[daemon] tmux send-keys 'agy' failed (${sendRes.code}): ${sendRes.stderr.trim()}`);
+        }
+
+        // Broadcast updated sessions to all authenticated clients
+        const updatedSessions = await listSessions();
+        broadcast({ type: 'sessions', sessions: updatedSessions });
+
+        // Confirmation to requesting client
+        send(ws, { type: 'spawn_result', success: true, name });
+        return;
+      }
+
+      // ── Kill session ──────────────────────────────────────────────────────────
+      if (msg.type === 'kill_session') {
+        if (typeof msg.name !== 'string' || !msg.name.trim()) {
+          send(ws, { type: 'error', message: '"kill_session" message must have a non-empty "name" field' });
+          return;
+        }
+
+        const targetName = msg.name.trim();
+        const currentSessions = await listSessions();
+        if (!currentSessions.includes(targetName)) {
+          send(ws, { type: 'error', message: `Session '${targetName}' not found` });
+          return;
+        }
+
+        console.log(`[daemon] Killing session '${targetName}'`);
+        const { code, stderr } = await runCommand('tmux', ['kill-session', '-t', targetName]);
+        if (code !== 0) {
+          console.error(`[daemon] tmux kill-session failed (${code}): ${stderr.trim()}`);
+          send(ws, { type: 'error', message: `Failed to kill session '${targetName}': ${stderr.trim()}` });
+          return;
+        }
+
+        // Clear waiting state if any
+        const state = sessionState.get(targetName);
+        if (state && state.waiting) {
+          broadcast({ type: 'waiting', session: targetName, waiting: false });
+        }
+
+        // Notify currently subscribed clients that session has ended
+        const clientSet = subscriptions.get(targetName);
+        if (clientSet) {
+          for (const client of clientSet) {
+            client.subscribedSession = null;
+            send(client, { type: 'session_ended', session: targetName });
+          }
+          subscriptions.delete(targetName);
+        }
+        sessionState.delete(targetName);
+
+        // Broadcast updated session list to all authenticated clients
+        const updatedSessions = await listSessions();
+        broadcast({ type: 'sessions', sessions: updatedSessions });
         return;
       }
 
