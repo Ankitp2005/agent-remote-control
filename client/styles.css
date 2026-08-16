@@ -167,6 +167,20 @@ html, body {
   color: var(--text-main);
 }
 
+.btn-icon:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-danger-icon {
+  color: #f87171;
+}
+
+.btn-danger-icon:hover, .btn-danger-icon:active {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+}
+
 /* Error Banner */
 .error-banner {
   background-color: rgba(239, 68, 68, 0.15);
@@ -191,6 +205,22 @@ html, body {
   font-weight: bold;
   cursor: pointer;
   font-size: 1.1rem;
+}
+
+/* Modal Form Error Banner */
+.form-error-banner {
+  background-color: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 8px;
+  color: #fca5a5;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+
+.form-error-banner.hidden {
+  display: none;
 }
 
 /* Output Console */
@@ -315,10 +345,32 @@ html, body {
   margin-bottom: 6px;
 }
 
+.modal-title-danger {
+  color: var(--accent-red);
+}
+
 .modal-subtitle {
   font-size: 0.85rem;
   color: var(--text-muted);
-  margin-bottom: 20px;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+
+.modal-warning-text {
+  font-size: 0.82rem;
+  color: #cbd5e1;
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  padding: 10px 12px;
+  line-height: 1.4;
+  margin-bottom: 16px;
+}
+
+.kill-target-name {
+  color: var(--accent-cyan);
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
 }
 
 .form-group {
@@ -333,6 +385,13 @@ html, body {
   margin-bottom: 6px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+.form-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 
 .form-input {
@@ -367,6 +426,22 @@ html, body {
   font-weight: 700;
   font-size: 0.95rem;
   cursor: pointer;
+}
+
+.btn-danger {
+  flex: 1;
+  background-color: var(--accent-red);
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  padding: 12px;
+  font-weight: 700;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.btn-danger:hover, .btn-danger:active {
+  background-color: #dc2626;
 }
 
 .btn-secondary {

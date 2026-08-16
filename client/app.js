@@ -1,5 +1,5 @@
 /**
- * Agent Remote Control - Mobile PWA Client (Phase 2)
+ * Agent Remote Control - Mobile PWA Client (Phase 5)
  */
 
 'use strict';
@@ -9,6 +9,10 @@ const STORAGE_IP = 'arc_daemon_ip';
 const STORAGE_PORT = 'arc_daemon_port';
 const STORAGE_TOKEN = 'arc_daemon_token';
 const STORAGE_SESSION = 'arc_last_session';
+const STORAGE_FOLDER = 'arc_last_folder';
+
+const DEFAULT_FOLDER = '/mnt/c/Users/Ankit pandey/OneDrive/Desktop/mobilePrompting/agent-remote-control';
+const SESSION_NAME_REGEX = /^[a-zA-Z0-9_-]{1,32}$/;
 
 // ─── DOM Elements ─────────────────────────────────────────────────────────────
 const statusDot = document.getElementById('status-dot');
@@ -22,6 +26,8 @@ const promptInput = document.getElementById('prompt-input');
 const sendBtn = document.getElementById('send-btn');
 
 const sessionSelect = document.getElementById('session-select');
+const newSessionBtn = document.getElementById('new-session-btn');
+const killSessionBtn = document.getElementById('kill-session-btn');
 const refreshSessionsBtn = document.getElementById('refresh-sessions-btn');
 
 const openSettingsBtn = document.getElementById('open-settings-btn');
@@ -31,6 +37,20 @@ const settingsForm = document.getElementById('settings-form');
 const settingIp = document.getElementById('setting-ip');
 const settingPort = document.getElementById('setting-port');
 const settingToken = document.getElementById('setting-token');
+
+const newSessionModal = document.getElementById('new-session-modal');
+const newSessionForm = document.getElementById('new-session-form');
+const sessionNameInput = document.getElementById('session-name-input');
+const sessionFolderInput = document.getElementById('session-folder-input');
+const cancelNewSessionBtn = document.getElementById('cancel-new-session-btn');
+const submitNewSessionBtn = document.getElementById('submit-new-session-btn');
+const spawnErrorBanner = document.getElementById('spawn-error-banner');
+const spawnErrorMessage = document.getElementById('spawn-error-message');
+
+const confirmKillModal = document.getElementById('confirm-kill-modal');
+const killSessionTargetName = document.getElementById('kill-session-target-name');
+const cancelKillBtn = document.getElementById('cancel-kill-btn');
+const confirmKillBtn = document.getElementById('confirm-kill-btn');
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let socket = null;
@@ -55,7 +75,8 @@ function getSettings() {
     ip: localStorage.getItem(STORAGE_IP) || '',
     port: localStorage.getItem(STORAGE_PORT) || '8787',
     token: localStorage.getItem(STORAGE_TOKEN) || '',
-    lastSession: localStorage.getItem(STORAGE_SESSION) || ''
+    lastSession: localStorage.getItem(STORAGE_SESSION) || '',
+    lastFolder: localStorage.getItem(STORAGE_FOLDER) || DEFAULT_FOLDER
   };
 }
 
@@ -75,6 +96,43 @@ function openSettingsModal() {
 
 function closeSettingsModal() {
   settingsModal.classList.add('hidden');
+}
+
+// ─── New Session Modal Management ─────────────────────────────────────────────
+function openNewSessionModal() {
+  sessionNameInput.value = '';
+  const { lastFolder } = getSettings();
+  sessionFolderInput.value = lastFolder;
+  hideSpawnError();
+  submitNewSessionBtn.disabled = false;
+  submitNewSessionBtn.textContent = 'Create Session';
+  newSessionModal.classList.remove('hidden');
+  sessionNameInput.focus();
+}
+
+function closeNewSessionModal() {
+  newSessionModal.classList.add('hidden');
+  hideSpawnError();
+}
+
+function showSpawnError(msg) {
+  spawnErrorMessage.textContent = msg;
+  spawnErrorBanner.classList.remove('hidden');
+}
+
+function hideSpawnError() {
+  spawnErrorBanner.classList.add('hidden');
+}
+
+// ─── Confirm Kill Modal Management ────────────────────────────────────────────
+function openKillModal() {
+  if (!currentSession) return;
+  killSessionTargetName.textContent = currentSession;
+  confirmKillModal.classList.remove('hidden');
+}
+
+function closeKillModal() {
+  confirmKillModal.classList.add('hidden');
 }
 
 // ─── UI Helpers ──────────────────────────────────────────────────────────────
@@ -130,19 +188,27 @@ function updateSessionPicker(sessions) {
 
 function renderSessionOptions() {
   sessionSelect.innerHTML = '';
+  sessionSelect.disabled = !isAuthenticated;
+  newSessionBtn.disabled = !isAuthenticated;
+  refreshSessionsBtn.disabled = !isAuthenticated;
 
   if (availableSessions.length === 0) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = 'No tmux sessions found';
-    sessionSelect.appendChild(opt);
-    sessionSelect.disabled = true;
-    setFormEnabled(false);
+    const emptyOpt = document.createElement('option');
+    emptyOpt.value = '';
+    emptyOpt.textContent = 'No sessions running';
+    sessionSelect.appendChild(emptyOpt);
+
+    const newOpt = document.createElement('option');
+    newOpt.value = '__new__';
+    newOpt.textContent = '+ New session...';
+    sessionSelect.appendChild(newOpt);
+
     currentSession = null;
+    sessionSelect.value = '';
+    killSessionBtn.disabled = true;
+    setFormEnabled(false);
     return;
   }
-
-  sessionSelect.disabled = !isAuthenticated;
 
   availableSessions.forEach((s) => {
     const opt = document.createElement('option');
@@ -151,6 +217,11 @@ function renderSessionOptions() {
     opt.textContent = isWaiting ? `🔴 ${s}` : s;
     sessionSelect.appendChild(opt);
   });
+
+  const newOpt = document.createElement('option');
+  newOpt.value = '__new__';
+  newOpt.textContent = '+ New session...';
+  sessionSelect.appendChild(newOpt);
 
   const { lastSession } = getSettings();
   let targetSession = currentSession;
@@ -167,6 +238,9 @@ function renderSessionOptions() {
 
   if (targetSession && targetSession !== currentSession) {
     subscribeToSession(targetSession);
+  } else if (targetSession) {
+    killSessionBtn.disabled = false;
+    setFormEnabled(true);
   }
 }
 
@@ -178,6 +252,7 @@ function subscribeToSession(sessionName) {
   currentSession = sessionName;
   localStorage.setItem(STORAGE_SESSION, sessionName);
   sessionSelect.value = sessionName;
+  killSessionBtn.disabled = false;
 
   clearOutput();
   setStatus('connected', `Subscribed: ${sessionName}`);
@@ -215,15 +290,13 @@ function connect() {
   setStatus('connecting', `Connecting to ${ip}...`);
   setFormEnabled(false);
   sessionSelect.disabled = true;
+  newSessionBtn.disabled = true;
+  killSessionBtn.disabled = true;
   refreshSessionsBtn.disabled = true;
   isAuthenticated = false;
 
   try {
     if (socket) {
-      // Null out handlers BEFORE closing so the intentional teardown
-      // doesn't trigger onclose → scheduleReconnect → connect() loop.
-      // Code 1005 (CLOSE_NO_STATUS) is what fires when we call .close()
-      // ourselves without a code — we must not treat that as a real disconnect.
       socket.onclose = null;
       socket.onerror = null;
       socket.onmessage = null;
@@ -256,6 +329,8 @@ function connect() {
       hideError();
       setStatus('connected', 'Connected');
       refreshSessionsBtn.disabled = false;
+      newSessionBtn.disabled = false;
+      sessionSelect.disabled = false;
     } else if (msg.type === 'sessions') {
       updateSessionPicker(msg.sessions);
     } else if (msg.type === 'waiting') {
@@ -272,6 +347,34 @@ function connect() {
       if (!msg.session || msg.session === currentSession) {
         appendOutput(msg.text);
       }
+    } else if (msg.type === 'spawn_result') {
+      if (msg.success) {
+        const folder = sessionFolderInput.value.trim();
+        if (folder) {
+          localStorage.setItem(STORAGE_FOLDER, folder);
+        }
+        closeNewSessionModal();
+        if (msg.name) {
+          currentSession = msg.name;
+          localStorage.setItem(STORAGE_SESSION, msg.name);
+          subscribeToSession(msg.name);
+        }
+      } else {
+        submitNewSessionBtn.disabled = false;
+        submitNewSessionBtn.textContent = 'Create Session';
+        showSpawnError(msg.reason || 'Failed to create session');
+      }
+    } else if (msg.type === 'session_ended') {
+      if (!msg.session || msg.session === currentSession) {
+        const endedName = msg.session || currentSession;
+        appendOutput(`\n\n[Session '${endedName}' ended]\n`);
+        currentSession = null;
+        localStorage.removeItem(STORAGE_SESSION);
+        setFormEnabled(false);
+        killSessionBtn.disabled = true;
+        setStatus('connected', `Session ended (${endedName})`);
+        renderSessionOptions();
+      }
     } else if (msg.type === 'error') {
       showError(msg.message || 'Daemon error occurred');
     }
@@ -281,9 +384,6 @@ function connect() {
     console.error('WebSocket error:', err);
     showError('WebSocket connection error');
     setStatus('disconnected', 'Connection error — retrying in 3s...');
-    // Always schedule a retry here. onclose will also fire after onerror
-    // on a failed connection, but scheduling here ensures the retry loop
-    // is active even if onclose doesn't fire (e.g. browser quirks).
     scheduleReconnect();
   };
 
@@ -293,6 +393,8 @@ function connect() {
     waitingSessions.clear();
     setFormEnabled(false);
     sessionSelect.disabled = true;
+    newSessionBtn.disabled = true;
+    killSessionBtn.disabled = true;
     refreshSessionsBtn.disabled = true;
 
     let reason = 'Disconnected';
@@ -344,21 +446,70 @@ promptForm.addEventListener('submit', (e) => {
 
 sessionSelect.addEventListener('change', (e) => {
   const selected = e.target.value;
+  if (selected === '__new__') {
+    sessionSelect.value = currentSession || '';
+    openNewSessionModal();
+    return;
+  }
   if (selected && selected !== currentSession) {
     subscribeToSession(selected);
   }
 });
 
 refreshSessionsBtn.addEventListener('click', requestSessionsList);
+newSessionBtn.addEventListener('click', openNewSessionModal);
+cancelNewSessionBtn.addEventListener('click', closeNewSessionModal);
+
+newSessionForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = sessionNameInput.value.trim();
+  const folder = sessionFolderInput.value.trim();
+
+  if (!name || !SESSION_NAME_REGEX.test(name)) {
+    showSpawnError('Session name must be 1–32 characters containing only letters, numbers, hyphens, or underscores');
+    return;
+  }
+
+  if (!folder) {
+    showSpawnError('Project folder path is required');
+    return;
+  }
+
+  if (!socket || socket.readyState !== WebSocket.OPEN || !isAuthenticated) {
+    showSpawnError('Not connected to daemon. Please connect first.');
+    return;
+  }
+
+  hideSpawnError();
+  submitNewSessionBtn.disabled = true;
+  submitNewSessionBtn.textContent = 'Creating...';
+
+  socket.send(JSON.stringify({
+    type: 'spawn_session',
+    name: name,
+    folder: folder
+  }));
+});
+
+killSessionBtn.addEventListener('click', openKillModal);
+cancelKillBtn.addEventListener('click', closeKillModal);
+
+confirmKillBtn.addEventListener('click', () => {
+  if (currentSession && socket && socket.readyState === WebSocket.OPEN && isAuthenticated) {
+    socket.send(JSON.stringify({
+      type: 'kill_session',
+      name: currentSession
+    }));
+  }
+  closeKillModal();
+});
+
 openSettingsBtn.addEventListener('click', openSettingsModal);
 cancelSettingsBtn.addEventListener('click', closeSettingsModal);
 dismissErrorBtn.addEventListener('click', hideError);
 
 // ─── Network & Offline Event Listeners ─────────────────────────────────────────
 window.addEventListener('offline', () => {
-  // Cancel any pending reconnect — no point retrying into a dead network.
-  // Do NOT call scheduleReconnect() here. We wait for the 'online' event
-  // instead, which fires when the browser believes the network is back.
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -368,12 +519,11 @@ window.addEventListener('offline', () => {
   waitingSessions.clear();
   setFormEnabled(false);
   sessionSelect.disabled = true;
+  newSessionBtn.disabled = true;
+  killSessionBtn.disabled = true;
   refreshSessionsBtn.disabled = true;
   setStatus('disconnected', 'No network — waiting...');
   if (socket) {
-    // Null handlers BEFORE close so this intentional teardown doesn't
-    // trigger the onclose → scheduleReconnect path (we want to wait for
-    // the 'online' event, not immediately retry into no network).
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
@@ -388,13 +538,6 @@ window.addEventListener('offline', () => {
 });
 
 window.addEventListener('online', () => {
-  // The browser fires 'online' optimistically — the network interface is
-  // up but Tailscale routes may not be re-established yet. Use a short
-  // delay before the first attempt so we don't immediately fail and have
-  // to wait a full 3 s for the scheduled retry.
-  // scheduleReconnect() (not connect()) means: if this first attempt after
-  // airplane-off also fails, onerror/onclose will call scheduleReconnect()
-  // again and the retry loop stays active automatically.
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -402,7 +545,7 @@ window.addEventListener('online', () => {
   setStatus('connecting', 'Network restored — reconnecting...');
   reconnectTimer = setTimeout(() => {
     connect();
-  }, 1500); // 1.5 s grace period for Tailscale route re-establishment
+  }, 1500);
 });
 
 settingsForm.addEventListener('submit', (e) => {

@@ -1,5 +1,5 @@
 // Minimal service worker for PWA installation support
-const CACHE_NAME = 'arc-v1';
+const CACHE_NAME = 'arc-v2';
 const ASSETS = [
   './',
   './index.html',

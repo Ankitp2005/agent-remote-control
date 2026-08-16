@@ -40,6 +40,12 @@
       <select id="session-select" class="session-select" disabled>
         <option value="">Select a session...</option>
       </select>
+      <button id="new-session-btn" class="btn-icon" title="New Session" disabled>
+        ➕
+      </button>
+      <button id="kill-session-btn" class="btn-icon btn-danger-icon" title="Kill Current Session" disabled>
+        🗑️
+      </button>
       <button id="refresh-sessions-btn" class="btn-icon" title="Refresh Sessions" disabled>
         🔄
       </button>
@@ -69,6 +75,76 @@
       >
       <button type="submit" id="send-btn" class="send-btn" disabled>Send</button>
     </form>
+  </div>
+
+  <!-- New Session Modal -->
+  <div id="new-session-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h2 class="modal-title">New Agent Session</h2>
+      <p class="modal-subtitle">Spawn a new tmux session running agy</p>
+
+      <div id="spawn-error-banner" class="form-error-banner hidden">
+        <span id="spawn-error-message"></span>
+      </div>
+
+      <form id="new-session-form">
+        <div class="form-group">
+          <label class="form-label" for="session-name-input">Session Name</label>
+          <input 
+            type="text" 
+            id="session-name-input" 
+            class="form-input" 
+            placeholder="e.g. agent-frontend" 
+            maxlength="32"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            required
+          >
+          <span class="form-hint">1–32 letters, numbers, hyphens, or underscores</span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="session-folder-input">Project Folder</label>
+          <input 
+            type="text" 
+            id="session-folder-input" 
+            class="form-input" 
+            placeholder="e.g. /mnt/c/... or ~/projects/..." 
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            required
+          >
+          <span class="form-hint">Working directory path on host machine</span>
+        </div>
+
+        <div class="form-actions">
+          <button type="button" id="cancel-new-session-btn" class="btn-secondary">Cancel</button>
+          <button type="submit" id="submit-new-session-btn" class="btn-primary">Create Session</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Confirm Kill Modal -->
+  <div id="confirm-kill-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <h2 class="modal-title modal-title-danger">Kill Session</h2>
+      <p class="modal-subtitle">
+        Are you sure you want to terminate <strong id="kill-session-target-name" class="kill-target-name"></strong>?
+      </p>
+      <p class="modal-warning-text">
+        This permanently closes the tmux session and terminates the running agent process.
+      </p>
+
+      <div class="form-actions">
+        <button type="button" id="cancel-kill-btn" class="btn-secondary">Cancel</button>
+        <button type="button" id="confirm-kill-btn" class="btn-danger">Kill Session</button>
+      </div>
+    </div>
   </div>
 
   <!-- Settings Modal -->
