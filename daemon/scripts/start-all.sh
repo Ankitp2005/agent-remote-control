@@ -34,7 +34,7 @@ log "Step 1: Checking Tailscale readiness..."
 TAILSCALE_READY=false
 TAILSCALE_IP=""
 
-for i in $(seq 1 15); do
+for i in $(seq 1 45); do
     IP=$(tailscale ip -4 2>/dev/null | head -n 1) || true
     if [ -n "$IP" ]; then
         TAILSCALE_READY=true
