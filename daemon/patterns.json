@@ -7,5 +7,8 @@
   "press enter to continue",
   "waiting for approval",
   "do you want to",
-  "allow this action"
+  "allow this action",
+  "↑/↓ Navigate",
+  "esc to cancel",
+  "1\\.\\s*Yes"
 ]
