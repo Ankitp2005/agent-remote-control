@@ -360,6 +360,11 @@ function computeDiff(lastClean, currentClean) {
 async function sendSessionsList(ws) {
   const sessions = await listSessions();
   send(ws, { type: 'sessions', sessions });
+  for (const [sName, sState] of sessionState.entries()) {
+    if (sState && sState.waiting && sessions.includes(sName)) {
+      send(ws, { type: 'waiting', session: sName, waiting: true });
+    }
+  }
 }
 
 function unsubscribeClient(ws) {
@@ -372,7 +377,6 @@ function unsubscribeClient(ws) {
     clientSet.delete(ws);
     if (clientSet.size === 0) {
       subscriptions.delete(oldSession);
-      sessionState.delete(oldSession);
     }
   }
 }
@@ -407,23 +411,11 @@ async function subscribeClient(ws, sessionName) {
 
 setInterval(async () => {
   try {
-    if (subscriptions.size === 0) return;
+    const activeSessions = await listSessions();
 
+    // 1. Clean up state and subscriptions for sessions that no longer exist in tmux
     for (const [sessionName, clientSet] of subscriptions.entries()) {
-      if (clientSet.size === 0) {
-        const state = sessionState.get(sessionName);
-        if (state && state.waiting) {
-          broadcast({ type: 'waiting', session: sessionName, waiting: false });
-        }
-        subscriptions.delete(sessionName);
-        sessionState.delete(sessionName);
-        continue;
-      }
-
-      const rawCapture = await capturePane(sessionName);
-
-      if (rawCapture === null) {
-        // Session disappeared or was killed on the PC
+      if (!activeSessions.includes(sessionName)) {
         const state = sessionState.get(sessionName);
         if (state && state.waiting) {
           broadcast({ type: 'waiting', session: sessionName, waiting: false });
@@ -435,29 +427,55 @@ setInterval(async () => {
         }
         subscriptions.delete(sessionName);
         sessionState.delete(sessionName);
-        listSessions().then((updated) => broadcast({ type: 'sessions', sessions: updated }));
+        broadcast({ type: 'sessions', sessions: activeSessions });
+      }
+    }
+
+    for (const sessionName of sessionState.keys()) {
+      if (!activeSessions.includes(sessionName)) {
+        const state = sessionState.get(sessionName);
+        if (state && state.waiting) {
+          broadcast({ type: 'waiting', session: sessionName, waiting: false });
+        }
+        sessionState.delete(sessionName);
+      }
+    }
+
+    // 2. Poll every active session for approval patterns and diff broadcasting
+    for (const sessionName of activeSessions) {
+      const rawCapture = await capturePane(sessionName);
+      if (rawCapture === null) {
         continue;
       }
 
       const clean = cleanCapture(rawCapture);
 
-      // Check approval patterns and emit waiting transitions
+      // Check approval patterns and emit waiting transitions (runs for every session, with or without subscribers)
       checkApprovalWaiting(sessionName, clean);
 
-      const state = sessionState.get(sessionName) || { lastCapture: '', waiting: false };
+      // Output diffing and streaming (only if there are active subscribers)
+      const clientSet = subscriptions.get(sessionName);
+      if (clientSet && clientSet.size > 0) {
+        const state = sessionState.get(sessionName) || { lastCapture: '', waiting: false };
 
-      if (clean === state.lastCapture) {
-        continue;
-      }
+        if (clean === state.lastCapture) {
+          continue;
+        }
 
-      const { diff } = computeDiff(state.lastCapture, clean);
-      state.lastCapture = clean;
-      sessionState.set(sessionName, state);
+        const { diff } = computeDiff(state.lastCapture, clean);
+        state.lastCapture = clean;
+        sessionState.set(sessionName, state);
 
-      if (diff.length > 0) {
-        const outputMsg = { type: 'output', session: sessionName, text: diff };
-        for (const client of clientSet) {
-          send(client, outputMsg);
+        if (diff.length > 0) {
+          const outputMsg = { type: 'output', session: sessionName, text: diff };
+          for (const client of clientSet) {
+            send(client, outputMsg);
+          }
+        }
+      } else {
+        const state = sessionState.get(sessionName);
+        if (state) {
+          state.lastCapture = clean;
         }
       }
     }
